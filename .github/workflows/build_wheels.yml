@@ -1,4 +1,4 @@
-name: Build Wheels (Windows + Ubuntu amd64)
+name: Build Wheels (Windows + Ubuntu amd64/arm64)
 
 on:
   push:
@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest, ubuntu-24.04-arm]
         python-version: ['3.10', '3.11', '3.12', '3.13']
 
     steps:
@@ -35,19 +35,19 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Build sdist and wheel (Linux)
+      - name: Build wheel (Linux)
         if: runner.os == 'Linux'
         run: |
-          python -m build --sdist --wheel
+          python -m build --wheel
 
-      - name: Build sdist and wheel (Windows, MSVC)
+      - name: Build wheel (Windows, MSVC)
         if: runner.os == 'Windows'
         shell: pwsh
         env:
           CC: cl
           CXX: cl
         run: |
-          python -m build --sdist --wheel
+          python -m build --wheel
 
       - name: Validate Linux wheel exists
         if: runner.os == 'Linux'
@@ -68,14 +68,14 @@ jobs:
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: vnpy_ctp-windows-amd64-py${{ matrix.python-version }}
-          path: dist/*
+          name: vnpy_ctp-windows-${{ runner.arch }}-py${{ matrix.python-version }}
+          path: dist/*.whl
           if-no-files-found: error
 
       - name: Upload build artifacts (Ubuntu)
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
-          name: vnpy_ctp-ubuntu-amd64-py${{ matrix.python-version }}
-          path: dist/*
+          name: vnpy_ctp-ubuntu-${{ runner.arch }}-py${{ matrix.python-version }}
+          path: dist/*.whl
           if-no-files-found: error
