@@ -2,9 +2,9 @@ name: Build Wheels (Windows + Ubuntu amd64)
 
 on:
   push:
-    branches: [ master ]
+    branches: [ main ]
   pull_request:
-    branches: [ master ]
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -31,7 +31,21 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install build wheel setuptools
 
-      - name: Build sdist and wheel
+      - name: Set up MSVC dev environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build sdist and wheel (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          python -m build --sdist --wheel
+
+      - name: Build sdist and wheel (Windows, MSVC)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          CC: cl
+          CXX: cl
         run: |
           python -m build --sdist --wheel
 
