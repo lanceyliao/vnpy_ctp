@@ -1,7 +1,11 @@
+import json
+import re
 import sys
+from collections import deque
 from datetime import datetime
 from time import sleep
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 from vnpy.event import EventEngine, Event
 from vnpy.trader.constant import (
@@ -60,6 +64,7 @@ from ..api import (
     THOST_FTDC_TC_IOC,
     THOST_FTDC_VC_CV,
     THOST_FTDC_AF_Delete,
+    THOST_FTDC_AF_Modify,
     THOST_FTDC_OSS_InsertRejected
 )
 
@@ -160,6 +165,8 @@ class CtpGateway(BaseGateway):
         self.md_api: CtpMdApi = CtpMdApi(self)
 
         self.count: int = 0
+        self._limit_price_cache: dict[str, dict[str, float]] = {}
+        self._limit_retry_registered: bool = False
 
     def connect(self, setting: dict) -> None:
         """连接交易接口"""
@@ -181,21 +188,33 @@ class CtpGateway(BaseGateway):
         ):
             td_address = "tcp://" + td_address
 
-        if (
-            (not md_address.startswith("tcp://"))
-            and (not md_address.startswith("ssl://"))
-            and (not md_address.startswith("socks"))
-        ):
-            md_address = "tcp://" + md_address
+        md_addresses: list[str] = [
+            addr if (
+                addr.startswith("tcp://")
+                or addr.startswith("ssl://")
+                or addr.startswith("socks")
+            ) else f"tcp://{addr}"
+            for addr in expand_domain_template(md_address)
+        ]
 
-        self.td_api.connect(td_address, userid, password, brokerid, auth_code, appid, production_mode)
-        self.md_api.connect(md_address, userid, password, brokerid, production_mode)
+        self._set_limit_retry(not self._load_limit_prices())
 
-        self.init_query()
+        md_only_mode: bool = not userid or not password
+        if md_only_mode:
+            self.write_log("检测到未提供用户名或密码，启用仅行情模式（不连接交易服务器）")
+        else:
+            self.td_api.connect(td_address, userid, password, brokerid, auth_code, appid, production_mode)
+            self.init_query()
+
+        self.md_api.connect(md_addresses, userid, password, brokerid, production_mode)
 
     def subscribe(self, req: SubscribeRequest) -> None:
         """订阅行情"""
         self.md_api.subscribe(req)
+
+    def unsubscribe(self, req: SubscribeRequest) -> None:
+        """退订行情"""
+        self.md_api.unsubscribe(req)
 
     def send_order(self, req: OrderRequest) -> str:
         """委托下单"""
@@ -213,6 +232,10 @@ class CtpGateway(BaseGateway):
         """查询持仓"""
         self.td_api.query_position()
 
+    def modify_order(self, order: OrderData) -> None:
+        """委托改单"""
+        self.td_api.modify_order(order)
+
     def close(self) -> None:
         """关闭接口"""
         self.td_api.close()
@@ -228,6 +251,8 @@ class CtpGateway(BaseGateway):
 
     def process_timer_event(self, event: Event) -> None:
         """定时事件处理"""
+        self.md_api.flush_subscribe_queue()
+
         self.count += 1
         if self.count < 2:
             return
@@ -244,6 +269,69 @@ class CtpGateway(BaseGateway):
         self.query_functions: list = [self.query_account, self.query_position]
         self.event_engine.register(EVENT_TIMER, self.process_timer_event)
 
+    def on_contract(self, contract: ContractData) -> None:
+        """合约信息推送"""
+        self._apply_limit_prices(contract)
+        super().on_contract(contract)
+
+    def _apply_limit_prices(self, contract: ContractData) -> None:
+        """把缓存中的涨跌停价写回合约对象"""
+        if contract.extra is None:
+            contract.extra = {}
+        contract.extra.update(self._limit_price_cache.get(contract.vt_symbol, {}))
+
+    def _backfill_published_contracts(self) -> None:
+        """通过on_contract重发已发布合约"""
+        for contract in list(symbol_contract_map.values()):
+            self.on_contract(contract)
+
+    def _set_limit_retry(self, active: bool) -> None:
+        """切换涨跌停HTTP重试定时器"""
+        if active == self._limit_retry_registered:
+            return
+
+        if active:
+            self.event_engine.register(EVENT_TIMER, self._on_limit_retry_timer)
+            self.write_log("涨跌停价首次加载失败，已注册EVENT_TIMER定时重试")
+        else:
+            self.event_engine.unregister(EVENT_TIMER, self._on_limit_retry_timer)
+
+        self._limit_retry_registered = active
+
+    def _on_limit_retry_timer(self, event: Event) -> None:
+        """EVENT_TIMER回调：定时重试HTTP加载涨跌停"""
+        if self._load_limit_prices():
+            self._backfill_published_contracts()
+            self._set_limit_retry(False)
+            self.write_log("涨跌停价定时重试成功，已通过on_contract重发已发布合约并注销EVENT_TIMER重试")
+
+    def _load_limit_prices(self) -> bool:
+        """通过HTTP加载涨跌停缓存"""
+        request: Request = Request("http://dict.openctp.cn/prices?types=futures")
+
+        try:
+            with urlopen(request, timeout=5) as response:
+                encoding: str = response.headers.get_content_charset() or "utf-8"
+                payload = json.loads(response.read().decode(encoding, errors="replace"))
+
+            data: list | None = payload.get("data") if isinstance(payload, dict) else None
+            if payload.get("rsp_code") not in (None, 0, "0", 200, "200") or not isinstance(data, list):
+                return False
+
+            cache: dict[str, dict[str, float]] = {}
+            for item in data:
+                cache[f"{item['InstrumentID']}.{item['ExchangeID']}"] = {
+                    "limit_up": item["UpperLimitPrice"],
+                    "limit_down": item["LowerLimitPrice"],
+                }
+
+            self._limit_price_cache = cache
+            self.write_log(f"涨跌停价加载成功，缓存键数量：{len(cache)}")
+            return True
+        except Exception:
+            self.write_log("涨跌停价加载失败")
+            return False
+
 
 class CtpMdApi(MdApi):
     """"""
@@ -259,7 +347,10 @@ class CtpMdApi(MdApi):
 
         self.connect_status: bool = False
         self.login_status: bool = False
-        self.subscribed: set = set()
+        self.subscribed: set[str] = set()
+        self.subscribe_queue: deque[tuple[str, bool]] = deque()
+        self.subscribe_batch_size: int = 50
+        self.symbol_exchange_map: dict[str, Exchange] = {}
 
         self.userid: str = ""
         self.password: str = ""
@@ -284,7 +375,7 @@ class CtpMdApi(MdApi):
             self.gateway.write_log("行情服务器登录成功")
 
             for symbol in self.subscribed:
-                self.subscribeMarketData(symbol)
+                self.subscribe_queue.append((symbol, True))
         else:
             self.gateway.write_error("行情服务器登录失败", error)
 
@@ -308,11 +399,20 @@ class CtpMdApi(MdApi):
         # 过滤还没有收到合约数据前的行情推送
         symbol: str = data["InstrumentID"]
         contract: ContractData | None = symbol_contract_map.get(symbol, None)
-        if not contract:
+
+        exchange: Exchange | None = None
+        name: str = symbol
+        if contract:
+            exchange = contract.exchange
+            name = contract.name
+        else:
+            exchange = self.symbol_exchange_map.get(symbol, None)
+
+        if not exchange:
             return
 
         # 对大商所的交易日字段取本地日期
-        if not data["ActionDay"] or contract.exchange == Exchange.DCE:
+        if not data["ActionDay"] or exchange == Exchange.DCE:
             date_str: str = self.current_date
         else:
             date_str = data["ActionDay"]
@@ -323,9 +423,9 @@ class CtpMdApi(MdApi):
 
         tick: TickData = TickData(
             symbol=symbol,
-            exchange=contract.exchange,
+            exchange=exchange,
             datetime=dt,
-            name=contract.name,
+            name=name,
             volume=data["Volume"],
             turnover=data["Turnover"],
             open_interest=data["OpenInterest"],
@@ -368,7 +468,7 @@ class CtpMdApi(MdApi):
 
     def connect(
         self,
-        address: str,
+        addresses: list[str],
         userid: str,
         password: str,
         brokerid: str,
@@ -384,7 +484,8 @@ class CtpMdApi(MdApi):
             path: Path = get_folder_path(self.gateway_name.lower())
             self.createFtdcMdApi((str(path) + "\\Md").encode("GBK"), production_mode)
 
-            self.registerFront(address)
+            for address in addresses:
+                self.registerFront(address)
             self.init()
 
             self.connect_status = True
@@ -402,9 +503,55 @@ class CtpMdApi(MdApi):
 
     def subscribe(self, req: SubscribeRequest) -> None:
         """订阅行情"""
-        if self.login_status:
-            self.subscribeMarketData(req.symbol)
-        self.subscribed.add(req.symbol)
+        symbol: str = req.symbol
+        self.symbol_exchange_map[symbol] = req.exchange
+        self.subscribed.add(symbol)
+        self.subscribe_queue.append((symbol, True))
+
+    def unsubscribe(self, req: SubscribeRequest) -> None:
+        """退订行情"""
+        symbol: str = req.symbol
+        self.subscribed.discard(symbol)
+        self.subscribe_queue.append((symbol, False))
+
+    def flush_subscribe_queue(self) -> None:
+        """定时批量发送订阅/退订请求"""
+        if not self.login_status:
+            return
+
+        latest_actions: dict[str, bool] = {}
+
+        count: int = 0
+        while self.subscribe_queue and count < self.subscribe_batch_size:
+            symbol, subscribe = self.subscribe_queue.popleft()
+            latest_actions[symbol] = subscribe
+            count += 1
+
+        if not latest_actions:
+            return
+
+        subscribe_symbols: list[str] = [
+            symbol for symbol, subscribe in latest_actions.items() if subscribe
+        ]
+        unsubscribe_symbols: list[str] = [
+            symbol for symbol, subscribe in latest_actions.items() if not subscribe
+        ]
+
+        if subscribe_symbols:
+            try:
+                self.subscribeMarketData(subscribe_symbols)
+            except Exception:
+                print("批量订阅失败，尝试逐个订阅")
+                for symbol in subscribe_symbols:
+                    self.subscribeMarketData(symbol)
+
+        if unsubscribe_symbols:
+            try:
+                self.unSubscribeMarketData(unsubscribe_symbols)
+            except Exception:
+                print("批量退订失败，尝试逐个退订")
+                for symbol in unsubscribe_symbols:
+                    self.unSubscribeMarketData(symbol)
 
     def close(self) -> None:
         """关闭连接"""
@@ -704,7 +851,8 @@ class CtpTdApi(TdApi):
             traded=data["VolumeTraded"],
             status=status,
             datetime=dt,
-            gateway_name=self.gateway_name
+            gateway_name=self.gateway_name,
+            reference=data.get("OrderMemo", "")
         )
         self.gateway.on_order(order)
 
@@ -822,6 +970,14 @@ class CtpTdApi(TdApi):
         tp: tuple = ORDERTYPE_VT2CTP[req.type]
         price_type, time_condition, volume_condition = tp
 
+        order_memo: str = req.reference
+        if len(order_memo) > 13:
+            original_order_memo: str = order_memo
+            order_memo = order_memo[:13]
+            self.gateway.write_log(
+                f"OrderMemo长度超过13字符，已截断：{original_order_memo} -> {order_memo}"
+            )
+
         ctp_req: dict = {
             "InstrumentID": req.symbol,
             "ExchangeID": req.exchange.value,
@@ -834,6 +990,7 @@ class CtpTdApi(TdApi):
             "InvestorID": self.userid,
             "UserID": self.userid,
             "BrokerID": self.brokerid,
+            "OrderMemo": order_memo,
             "CombHedgeFlag": THOST_FTDC_HF_Speculation,
             "ContingentCondition": THOST_FTDC_CC_Immediately,
             "ForceCloseReason": THOST_FTDC_FCC_NotForceClose,
@@ -873,6 +1030,41 @@ class CtpTdApi(TdApi):
         self.reqid += 1
         self.reqOrderAction(ctp_req, self.reqid)
 
+    def modify_order(self, order: OrderData) -> None:
+        """委托改单"""
+        try:
+            frontid, sessionid, order_ref = order.orderid.split("_")
+        except ValueError:
+            self.gateway.write_log(f"改单失败，orderid格式错误：{order.orderid}")
+            return
+
+        order_memo: str = order.reference
+        if len(order_memo) > 13:
+            original_order_memo: str = order_memo
+            order_memo = order_memo[:13]
+            self.gateway.write_log(
+                f"OrderMemo长度超过13字符，已截断：{original_order_memo} -> {order_memo}"
+            )
+
+        ctp_req: dict = {
+            "InstrumentID": order.symbol,
+            "ExchangeID": order.exchange.value,
+            "OrderRef": order_ref,
+            "FrontID": int(frontid),
+            "SessionID": int(sessionid),
+            "ActionFlag": THOST_FTDC_AF_Modify,
+            "LimitPrice": order.price,
+            "VolumeChange": int(order.volume),
+            "BrokerID": self.brokerid,
+            "InvestorID": self.userid,
+            "OrderMemo": order_memo,
+        }
+
+        self.reqid += 1
+        n: int = self.reqOrderAction(ctp_req, self.reqid)
+        if n:
+            self.gateway.write_log(f"改单请求本地返回非零，返回码：{n}，orderid={order.orderid}")
+
     def query_account(self) -> None:
         """查询资金"""
         self.reqid += 1
@@ -902,3 +1094,25 @@ def adjust_price(price: float) -> float:
     if price == MAX_FLOAT:
         price = 0
     return price
+
+
+def expand_domain_template(address: str) -> list[str]:
+    """将域名模板扩展为实际地址列表"""
+    match = re.search(r"{([0-9,/]+)}", address)
+    if match:
+        ranges_str: str = match.group(1)
+        numbers: set[int] = set()
+
+        for part in ranges_str.split(","):
+            if "/" in part:
+                start, end = map(int, part.split("/"))
+                numbers.update(range(start, end + 1))
+            else:
+                numbers.add(int(part))
+
+        return [address.replace(match.group(0), str(i)) for i in sorted(numbers)]
+
+    if "," in address:
+        return [addr.strip() for addr in address.split(",") if addr.strip()]
+
+    return [address]
