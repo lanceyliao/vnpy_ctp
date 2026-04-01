@@ -349,7 +349,6 @@ class CtpMdApi(MdApi):
         self.login_status: bool = False
         self.subscribed: set[str] = set()
         self.subscribe_queue: deque[tuple[str, bool]] = deque()
-        self.subscribe_batch_size: int = 50
         self.symbol_exchange_map: dict[str, Exchange] = {}
 
         self.userid: str = ""
@@ -521,11 +520,9 @@ class CtpMdApi(MdApi):
 
         latest_actions: dict[str, bool] = {}
 
-        count: int = 0
-        while self.subscribe_queue and count < self.subscribe_batch_size:
+        while self.subscribe_queue:
             symbol, subscribe = self.subscribe_queue.popleft()
             latest_actions[symbol] = subscribe
-            count += 1
 
         if not latest_actions:
             return
@@ -538,20 +535,10 @@ class CtpMdApi(MdApi):
         ]
 
         if subscribe_symbols:
-            try:
-                self.subscribeMarketData(subscribe_symbols)
-            except Exception:
-                print("批量订阅失败，尝试逐个订阅")
-                for symbol in subscribe_symbols:
-                    self.subscribeMarketData(symbol)
+            self.subscribeMarketData(subscribe_symbols)
 
         if unsubscribe_symbols:
-            try:
-                self.unSubscribeMarketData(unsubscribe_symbols)
-            except Exception:
-                print("批量退订失败，尝试逐个退订")
-                for symbol in unsubscribe_symbols:
-                    self.unSubscribeMarketData(symbol)
+            self.unSubscribeMarketData(unsubscribe_symbols)
 
     def close(self) -> None:
         """关闭连接"""
