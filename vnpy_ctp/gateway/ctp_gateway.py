@@ -232,10 +232,6 @@ class CtpGateway(BaseGateway):
         """查询持仓"""
         self.td_api.query_position()
 
-    def modify_order(self, order: OrderData) -> None:
-        """委托改单"""
-        self.td_api.modify_order(order)
-
     def close(self) -> None:
         """关闭接口"""
         self.td_api.close()
@@ -1016,41 +1012,6 @@ class CtpTdApi(TdApi):
 
         self.reqid += 1
         self.reqOrderAction(ctp_req, self.reqid)
-
-    def modify_order(self, order: OrderData) -> None:
-        """委托改单"""
-        try:
-            frontid, sessionid, order_ref = order.orderid.split("_")
-        except ValueError:
-            self.gateway.write_log(f"改单失败，orderid格式错误：{order.orderid}")
-            return
-
-        order_memo: str = order.reference
-        if len(order_memo) > 13:
-            original_order_memo: str = order_memo
-            order_memo = order_memo[:13]
-            self.gateway.write_log(
-                f"OrderMemo长度超过13字符，已截断：{original_order_memo} -> {order_memo}"
-            )
-
-        ctp_req: dict = {
-            "InstrumentID": order.symbol,
-            "ExchangeID": order.exchange.value,
-            "OrderRef": order_ref,
-            "FrontID": int(frontid),
-            "SessionID": int(sessionid),
-            "ActionFlag": THOST_FTDC_AF_Modify,
-            "LimitPrice": order.price,
-            "VolumeChange": int(order.volume),
-            "BrokerID": self.brokerid,
-            "InvestorID": self.userid,
-            "OrderMemo": order_memo,
-        }
-
-        self.reqid += 1
-        n: int = self.reqOrderAction(ctp_req, self.reqid)
-        if n:
-            self.gateway.write_log(f"改单请求本地返回非零，返回码：{n}，orderid={order.orderid}")
 
     def query_account(self) -> None:
         """查询资金"""
