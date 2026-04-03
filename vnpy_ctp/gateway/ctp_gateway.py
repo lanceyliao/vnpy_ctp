@@ -770,9 +770,9 @@ class CtpTdApi(TdApi):
                 contract.option_listed = datetime.strptime(data["OpenDate"], "%Y%m%d")
                 contract.option_expiry = datetime.strptime(data["ExpireDate"], "%Y%m%d")
 
-            self.gateway.on_contract(contract)
-
             symbol_contract_map[contract.symbol] = contract
+
+            self.gateway.on_contract(contract)
 
         if last:
             self.contract_inited = True
