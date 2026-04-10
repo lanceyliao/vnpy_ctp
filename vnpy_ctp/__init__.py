@@ -29,6 +29,7 @@ __all__ = ["CtpGateway"]
 def __getattr__(name: str):
     if name == "CtpGateway":
         from .gateway import CtpGateway
+        globals()[name] = CtpGateway
         return CtpGateway
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
