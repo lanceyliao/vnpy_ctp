@@ -23,10 +23,14 @@
 
 from importlib import metadata
 
-from .gateway import CtpGateway
-
-
 __all__ = ["CtpGateway"]
+
+
+def __getattr__(name: str):
+    if name == "CtpGateway":
+        from .gateway import CtpGateway
+        return CtpGateway
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 try:
