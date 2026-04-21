@@ -645,6 +645,8 @@ class CtpTdApi(TdApi):
             status=Status.REJECTED,
             gateway_name=self.gateway_name
         )
+        # 添加拒单原因，供下游解析错误码和信息
+        order.rejected_reason = json.dumps({"code": error["ErrorID"], "msg": error["ErrorMsg"]}, ensure_ascii=False)
         self.gateway.on_order(order)
 
         self.gateway.write_error("交易委托失败", error)
