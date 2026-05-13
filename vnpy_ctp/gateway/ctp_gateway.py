@@ -138,7 +138,7 @@ symbol_contract_map: dict[str, ContractData] = {}
 
 
 class Settlement:
-    """结算单：settlement_cap 拼包；_begin 固定 trading_day、userid 并生成落盘文件名；末包 _seal(text) 后入 settlements；_save 只拼目录。"""
+    """结算单：settlement_cap 拼包；_begin 固定 trading_day、userid 并生成「结算单_{userid}_{周期}.txt」；末包 _seal(text)；_save 只拼目录。"""
 
     def __init__(self) -> None:
         self.chunks: list[bytes] = []
@@ -157,7 +157,7 @@ class Settlement:
         fb = '\\/:*?"<>|'
         mid = "".join(c for c in (trading_day or "unknown") if c not in fb and ord(c) >= 32) or "unknown"
         uid = "".join(c for c in (userid or "unknown") if c not in fb and ord(c) >= 32) or "unknown"
-        self.filename = f"结算单_{mid}_{uid}.txt"
+        self.filename = f"结算单_{uid}_{mid}.txt"
 
     def _clear_pending(self) -> None:
         self.chunks.clear()
@@ -295,11 +295,11 @@ class CtpGateway(BaseGateway):
         self.td_api.query_position()
 
     def query_settlement(self, trading_day: str = "") -> None:
-        """查询结算单；建议传入 yyyymmdd，末包拼齐后写入 settlements 与 settlement 目录 txt"""
+        """查询结算单；不传则为上海时区当天自然日 yyyymmdd；可传 yyyymmdd 或月结 yymm。"""
         self.td_api.query_settlement(trading_day)
 
     def get_settlement(self, trading_day: str) -> str | None:
-        """按 yyyymmdd 取已缓存的结算单正文，无则 None"""
+        """按与 query_settlement 相同的 trading_day 键取已缓存正文，无则 None。"""
         st: Settlement | None = self.td_api.settlements.get(trading_day)
         return st.text if st else None
 
@@ -652,7 +652,6 @@ class CtpTdApi(TdApi):
 
         self.settlements: dict[str, Settlement] = {}
         self.settlement_cap: Settlement = Settlement()
-        self.session_trading_day: str = ""
 
     def onFrontConnected(self) -> None:
         """服务器连接成功回报"""
@@ -696,9 +695,6 @@ class CtpTdApi(TdApi):
             }
             self.reqid += 1
             self.reqSettlementInfoConfirm(ctp_req, self.reqid)
-
-            td: str = data.get("TradingDay", "")
-            self.session_trading_day = td.decode("ascii") if isinstance(td, bytes) else str(td)
         else:
             self.login_failed = True
 
@@ -773,7 +769,7 @@ class CtpTdApi(TdApi):
         """确认结算单回报"""
         self.gateway.write_log("结算信息确认成功")
 
-        self.query_settlement(self.session_trading_day)
+        self.query_settlement()
 
         # 由于流控，单次查询可能失败，通过while循环持续尝试，直到成功发出请求
         while True:
@@ -1150,22 +1146,26 @@ class CtpTdApi(TdApi):
         self.reqQryInvestorPosition(ctp_req, self.reqid)
 
     def query_settlement(self, trading_day: str = "") -> None:
-        """发起一次 ReqQrySettlementInfo；末包拼齐后写入 settlements 与 settlement/结算单_yyyymmdd.txt（建议传入 yyyymmdd）"""
+        """发起一次 ReqQrySettlementInfo；未传 trading_day 时用上海时区当天自然日 yyyymmdd（请求体与缓存键一致）。可传 yyyymmdd 或月结 yymm。"""
         if not self.login_status:
             self.gateway.write_log("尚未登录交易，跳过查询结算信息")
             return
 
-        name_day: str = trading_day or datetime.now(CHINA_TZ).strftime("%Y%m%d")
-        ctp_req: dict = {"BrokerID": self.brokerid, "InvestorID": self.userid}
-        if trading_day:
-            ctp_req["TradingDay"] = trading_day
+        qday: str = trading_day or datetime.now(CHINA_TZ).strftime("%Y%m%d")
+        ctp_req: dict = {
+            "BrokerID": self.brokerid,
+            "InvestorID": self.userid,
+            "TradingDay": qday,
+        }
+        self.gateway.write_log(f"查询结算单 TradingDay={qday}")
 
         self.reqid += 1
-        self.settlement_cap._begin(name_day, self.userid, self.reqid)
+        self.settlement_cap._begin(qday, self.userid, self.reqid)
         n: int = self.reqQrySettlementInfo(ctp_req, self.reqid)
         if n:
             self.settlement_cap._abandon_send()
             self.gateway.write_log(f"查询结算单请求未发出（流控等），错误码：{n}，请稍后重试 query_settlement")
+
 
     def close(self) -> None:
         """关闭连接"""
