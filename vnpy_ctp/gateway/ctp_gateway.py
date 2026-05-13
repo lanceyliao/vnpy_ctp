@@ -138,28 +138,30 @@ symbol_contract_map: dict[str, ContractData] = {}
 
 
 class Settlement:
-    """结算单：网关内用 settlement_cap 拼包；完成后放入 settlements。对外 trading_day / text / save（文件名含 userid）。"""
+    """结算单：settlement_cap 拼包；_begin 固定 trading_day、userid 并生成落盘文件名；末包 _seal(text) 后入 settlements；_save 只拼目录。"""
 
     def __init__(self) -> None:
         self.chunks: list[bytes] = []
         self.reqid: int | None = None
-        self.query_day: str = ""
-        self.rsp_day: str = ""
         self.trading_day: str = ""
         self.text: str = ""
         self.userid: str = ""
+        self.filename: str = ""
 
-    def _begin(self, query_day: str, reqid: int) -> None:
+    def _begin(self, trading_day: str, userid: str, reqid: int) -> None:
         self._clear_pending()
-        self.userid = ""
-        self.query_day = query_day
+        self.text = ""
+        self.trading_day = trading_day
+        self.userid = userid
         self.reqid = reqid
+        fb = '\\/:*?"<>|'
+        mid = "".join(c for c in (trading_day or "unknown") if c not in fb and ord(c) >= 32) or "unknown"
+        uid = "".join(c for c in (userid or "unknown") if c not in fb and ord(c) >= 32) or "unknown"
+        self.filename = f"结算单_{mid}_{uid}.txt"
 
     def _clear_pending(self) -> None:
         self.chunks.clear()
         self.reqid = None
-        self.query_day = ""
-        self.rsp_day = ""
 
     def _matches(self, reqid: int) -> bool:
         return self.reqid is not None and reqid == self.reqid
@@ -171,9 +173,6 @@ class Settlement:
     def _ingest(self, data: dict) -> None:
         if not data:
             return
-        td_raw = data.get("TradingDay")
-        if td_raw not in (None, ""):
-            self.rsp_day = td_raw.decode("ascii") if isinstance(td_raw, bytes) else str(td_raw)
         if data.get("Content") is not None:
             self.chunks.append(bytes(data["Content"]))
 
@@ -183,27 +182,18 @@ class Settlement:
         self.reqid = None
         return body
 
-    def _seal(self, trading_day: str, text: str, userid: str) -> None:
-        """拼包结束：写入对外字段并清掉进行中状态"""
-        self.trading_day = trading_day
+    def _seal(self, text: str) -> None:
+        """末包拼齐：只写入正文，trading_day/userid 已在 _begin 确定。"""
         self.text = text
-        self.userid = userid
         self._clear_pending()
 
-    def save(self) -> Path:
-        """.vntrader/settlement/ 结算单_yyyymmdd_userid.txt，UTF-8"""
+    def _save(self) -> Path:
         if not self.text:
-            raise ValueError("Settlement.save: 无正文")
+            raise ValueError("Settlement._save: 无正文")
+        if not self.filename:
+            raise ValueError("Settlement._save: 未 _begin")
         root: Path = get_folder_path("settlement")
-        safe: str = (
-            self.trading_day
-            if len(self.trading_day) == 8 and self.trading_day.isdigit()
-            else "unknown"
-        )
-        raw: str = self.userid if self.userid else "unknown"
-        # 仅去掉 Windows 文件名非法字符，不插入下划线，避免下游按 "_" split 分段错乱
-        uid: str = "".join(c for c in raw if c not in '\\/:*?"<>|' and ord(c) >= 32) or "unknown"
-        path: Path = root / f"结算单_{safe}_{uid}.txt"
+        path: Path = root / self.filename
         path.write_text(self.text, encoding="utf-8", newline="\n")
         return path
 
@@ -761,24 +751,17 @@ class CtpTdApi(TdApi):
             return
 
         body: bytes = cap._take_merged()
-        qday: str = cap.query_day
-        rday: str = cap.rsp_day
 
         if body:
             try:
                 text: str = body.decode("gbk")
             except UnicodeDecodeError:
                 text = body.decode("gbk", errors="replace")
-            day_key: str = (
-                rday or qday or self.session_trading_day or datetime.now(CHINA_TZ).strftime("%Y%m%d")
-            )
-            if len(day_key) != 8 or not day_key.isdigit():
-                day_key = datetime.now(CHINA_TZ).strftime("%Y%m%d")
-            cap._seal(day_key, text, self.userid)
-            self.settlements[day_key] = cap
-            path: Path = cap.save()
+            cap._seal(text)
+            self.settlements[cap.trading_day] = cap
+            path: Path = cap._save()
             self.gateway.write_log(
-                f"结算信息 {day_key} 已拼齐 {len(body)} 字节，已缓存并写入 {path}"
+                f"结算信息 {cap.trading_day} 已拼齐 {len(body)} 字节，已缓存并写入 {path}"
             )
             self.settlement_cap = Settlement()
             return
@@ -1172,12 +1155,13 @@ class CtpTdApi(TdApi):
             self.gateway.write_log("尚未登录交易，跳过查询结算信息")
             return
 
+        name_day: str = trading_day or datetime.now(CHINA_TZ).strftime("%Y%m%d")
         ctp_req: dict = {"BrokerID": self.brokerid, "InvestorID": self.userid}
         if trading_day:
             ctp_req["TradingDay"] = trading_day
 
         self.reqid += 1
-        self.settlement_cap._begin(trading_day, self.reqid)
+        self.settlement_cap._begin(name_day, self.userid, self.reqid)
         n: int = self.reqQrySettlementInfo(ctp_req, self.reqid)
         if n:
             self.settlement_cap._abandon_send()
