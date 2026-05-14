@@ -180,8 +180,13 @@ class Settlement:
     def _ingest(self, data: dict) -> None:
         if not data:
             return
-        if data.get("Content") is not None:
-            self.chunks.append(bytes(data["Content"]))
+        raw = data.get("Content")
+        if raw is None:
+            return
+        if isinstance(raw, bytes):
+            self.chunks.append(raw)
+        else:
+            self.chunks.append(str(raw).encode("utf-8"))
 
     def _take_merged(self) -> bytes:
         body: bytes = b"".join(self.chunks)
@@ -757,9 +762,12 @@ class CtpTdApi(TdApi):
 
         if body:
             try:
-                text: str = body.decode("gbk")
+                text: str = body.decode("utf-8")
             except UnicodeDecodeError:
-                text = body.decode("gbk", errors="replace")
+                try:
+                    text = body.decode("gbk")
+                except UnicodeDecodeError:
+                    text = body.decode("utf-8", errors="replace")
             cap._seal(text)
             self.settlements[cap.trading_day] = cap
             path: Path = cap._save()
