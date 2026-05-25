@@ -1,6 +1,7 @@
 import json
 import re
 import sys
+from math import ceil
 from collections import deque
 from datetime import datetime, timedelta
 from time import sleep
@@ -241,8 +242,8 @@ class CtpGateway(BaseGateway):
         self.count: int = 0
         self.sub_count: int = 0
         interval: float = event_engine._interval or 1
-        self.sub_interval: int = max(1, round(1 / interval))
-        self.query_interval: int = max(1, round(2 / interval))
+        self.sub_interval: int = max(1, ceil(1 / interval))
+        self.query_interval: int = max(1, ceil(2 / interval))
         self._limit_price_cache: dict[str, dict[str, float]] = {}
         self._limit_retry_registered: bool = False
 
