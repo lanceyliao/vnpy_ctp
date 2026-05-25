@@ -239,6 +239,10 @@ class CtpGateway(BaseGateway):
         self.settlements: dict[str, Settlement] = self.td_api.settlements
 
         self.count: int = 0
+        self.sub_count: int = 0
+        interval: float = event_engine._interval or 1
+        self.sub_interval: int = max(1, round(1 / interval))
+        self.query_interval: int = max(1, round(2 / interval))
         self._limit_price_cache: dict[str, dict[str, float]] = {}
         self._limit_retry_registered: bool = False
 
@@ -330,10 +334,13 @@ class CtpGateway(BaseGateway):
 
     def process_timer_event(self, event: Event) -> None:
         """定时事件处理"""
-        self.md_api.flush_subscribe_queue()
+        self.sub_count += 1
+        if self.sub_count >= self.sub_interval:
+            self.sub_count = 0
+            self.md_api.flush_subscribe_queue()
 
         self.count += 1
-        if self.count < 2:
+        if self.count < self.query_interval:
             return
         self.count = 0
 
