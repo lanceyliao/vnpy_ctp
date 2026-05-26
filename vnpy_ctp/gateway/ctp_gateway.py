@@ -240,9 +240,7 @@ class CtpGateway(BaseGateway):
         self.settlements: dict[str, Settlement] = self.td_api.settlements
 
         self.count: int = 0
-        self.sub_count: int = 0
         interval: float = event_engine._interval or 1
-        self.sub_interval: int = max(1, ceil(1 / interval))
         self.query_interval: int = max(1, ceil(2 / interval))
         self._limit_price_cache: dict[str, dict[str, float]] = {}
         self._limit_retry_registered: bool = False
@@ -335,11 +333,6 @@ class CtpGateway(BaseGateway):
 
     def process_timer_event(self, event: Event) -> None:
         """定时事件处理"""
-        self.sub_count += 1
-        if self.sub_count >= self.sub_interval:
-            self.sub_count = 0
-            self.md_api.flush_subscribe_queue()
-
         self.count += 1
         if self.count < self.query_interval:
             return
@@ -348,8 +341,6 @@ class CtpGateway(BaseGateway):
         func = self.query_functions.pop(0)
         func()
         self.query_functions.append(func)
-
-        self.md_api.update_date()
 
     def init_query(self) -> None:
         """初始化查询任务"""
@@ -443,6 +434,10 @@ class CtpMdApi(MdApi):
         self.brokerid: str = ""
 
         self.current_date: str = datetime.now().strftime("%Y%m%d")
+        
+        # 订阅队列刷新计数器
+        self.sub_count: int = 0
+        self.sub_interval: int = 0  # 将在 connect 时设置
 
     def onFrontConnected(self) -> None:
         """服务器连接成功回报"""
@@ -459,6 +454,9 @@ class CtpMdApi(MdApi):
         if not error["ErrorID"]:
             self.login_status = True
             self.gateway.write_log("行情服务器登录成功")
+            
+            # 注册定时器用于刷新订阅队列和更新日期
+            self.gateway.event_engine.register(EVENT_TIMER, self.process_timer_event)
 
             for symbol in self.subscribed:
                 self.subscribe_queue.append((symbol, True))
@@ -564,6 +562,10 @@ class CtpMdApi(MdApi):
         self.userid = userid
         self.password = password
         self.brokerid = brokerid
+        
+        # 设置订阅刷新间隔
+        interval: float = self.gateway.event_engine._interval or 1
+        self.sub_interval = max(1, ceil(1 / interval))
 
         # 禁止重复发起连接，会导致异常崩溃
         if not self.connect_status:
@@ -604,6 +606,12 @@ class CtpMdApi(MdApi):
         """定时批量发送订阅/退订请求"""
         if not self.login_status:
             return
+        
+        # 计数器控制刷新频率
+        self.sub_count += 1
+        if self.sub_count < self.sub_interval:
+            return
+        self.sub_count = 0
 
         latest_actions: dict[str, bool] = {}
 
@@ -626,6 +634,11 @@ class CtpMdApi(MdApi):
 
         if unsubscribe_symbols:
             self.unSubscribeMarketData(unsubscribe_symbols)
+    
+    def process_timer_event(self, event: Event) -> None:
+        """定时事件处理"""
+        self.flush_subscribe_queue()
+        self.update_date()
 
     def close(self) -> None:
         """关闭连接"""
