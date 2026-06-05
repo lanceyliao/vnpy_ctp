@@ -931,8 +931,16 @@ class CtpTdApi(TdApi):
                 # 如果找不到 OrderSysID，则查询全部订单
                 pass
 
+        self.reqid += 1
         n: int = self.reqQryOrder(ctp_req, self.reqid)
         return n
+
+    def onRspQryOrder(self, data: dict, error: dict, reqid: int, last: bool) -> None:
+        """委托查询回报"""
+        if not data:
+            return
+
+        self._process_order_update(data)
 
     def onRspQryInstrument(self, data: dict, error: dict, reqid: int, last: bool) -> None:
         """合约查询回报"""
@@ -987,6 +995,10 @@ class CtpTdApi(TdApi):
             self.order_data.append(data)
             return
 
+        self._process_order_update(data)
+
+    def _process_order_update(self, data: dict) -> None:
+        """解析委托回报并推送（onRtnOrder / onRspQryOrder 共用）"""
         symbol: str = data["InstrumentID"]
         contract: ContractData = symbol_contract_map[symbol]
 
