@@ -6,6 +6,7 @@ from collections import deque
 from datetime import datetime, timedelta
 from time import sleep
 from pathlib import Path
+from threading import Lock
 from urllib.request import Request, urlopen
 
 from vnpy.event import EventEngine, Event
@@ -245,6 +246,7 @@ class CtpGateway(BaseGateway):
         self._limit_price_cache: dict[str, dict[str, float]] = {}
         self._limit_retry_registered: bool = False
         self.orders: dict[str, OrderData] = {}
+        self._order_lock = Lock()
 
     def connect(self, setting: dict) -> None:
         """连接交易接口"""
@@ -359,22 +361,25 @@ class CtpGateway(BaseGateway):
 
     def on_order(self, order: OrderData) -> None:
         """仅推送有效增量：成交量上涨，或成交量不变但状态变化"""
-        last_order: OrderData | None = self.orders.get(order.orderid)
-        if last_order:
-            if not last_order.is_active():
-                self.write_log(
-                    f"忽略订单回报，订单号：{order.orderid}，状态：{order.status}，"
-                    f"已成交：{order.traded}，剩余：{order.volume - order.traded}"
-                )
-                return
+        # CTP回调线程和EventEngine下单线程都可能进入此处。必须把判重、
+        # 缓存更新和事件入队作为整体串行化，避免REJECTED后倒退到SUBMITTING。
+        with self._order_lock:
+            last_order: OrderData | None = self.orders.get(order.orderid)
+            if last_order:
+                if not last_order.is_active():
+                    self.write_log(
+                        f"忽略订单回报，订单号：{order.orderid}，状态：{order.status}，"
+                        f"已成交：{order.traded}，剩余：{order.volume - order.traded}"
+                    )
+                    return
 
-            traded_change: float = order.traded - last_order.traded
-            status_change: bool = order.status != last_order.status
-            if traded_change < 0 or (traded_change == 0 and not status_change):
-                return
+                traded_change: float = order.traded - last_order.traded
+                status_change: bool = order.status != last_order.status
+                if traded_change < 0 or (traded_change == 0 and not status_change):
+                    return
 
-        self.orders[order.orderid] = order
-        super().on_order(order)
+            self.orders[order.orderid] = order
+            super().on_order(order)
 
     def _apply_limit_prices(self, contract: ContractData) -> None:
         """把缓存中的涨跌停价写回合约对象"""
