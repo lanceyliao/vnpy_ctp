@@ -1,3 +1,5 @@
+"""CTP 接口常量。"""
+
 THOST_FTDC_EXP_Normal = '0'  # THOST=Trader Host；FTDC=Futures Trading Data Center（CTP常量前缀）；EXP=Exchange Property
 THOST_FTDC_EXP_GenOrderByTrade = '1'
 THOST_FTDC_ICT_EID = '0'  # ICT=Id Card Type（证件类型）

@@ -445,7 +445,7 @@ class CtpGateway(BaseGateway):
 
 
 class CtpMdApi(MdApi):
-    """"""
+    """对接期货 CTP 柜台的行情接口。"""
 
     def __init__(self, gateway: CtpGateway) -> None:
         """构造函数"""
@@ -685,7 +685,7 @@ class CtpMdApi(MdApi):
 
 
 class CtpTdApi(TdApi):
-    """"""
+    """对接期货 CTP 柜台的交易接口。"""
 
     def __init__(self, gateway: CtpGateway) -> None:
         """构造函数"""

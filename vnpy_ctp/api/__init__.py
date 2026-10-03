@@ -1,3 +1,5 @@
+"""导出 CTP 行情、交易接口及常量。"""
+
 from .ctp_constant import *     # noqa
 
 
