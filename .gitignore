@@ -38,3 +38,8 @@ x64/
 .DS_Store
 *.whl
 *.md
+
+# Type checker / linter / test caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
