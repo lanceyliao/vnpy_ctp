@@ -1,3 +1,5 @@
+"""实现 CTP 期货交易接口。"""
+from collections.abc import Callable
 import json
 import re
 import sys
@@ -132,8 +134,8 @@ OPTIONTYPE_CTP2VT: dict[str, OptionType] = {
 }
 
 # 其他常量
-MAX_FLOAT = sys.float_info.max                  # 浮点数极限值
-CHINA_TZ = ZoneInfo("Asia/Shanghai")       # 中国时区
+MAX_FLOAT: float = sys.float_info.max                  # 浮点数极限值
+CHINA_TZ: ZoneInfo = ZoneInfo("Asia/Shanghai")       # 中国时区
 
 # 合约数据全局缓存字典
 symbol_contract_map: dict[str, ContractData] = {}
@@ -347,7 +349,7 @@ class CtpGateway(BaseGateway):
             return
         self.count = 0
 
-        func = self.query_functions.pop(0)
+        func: Callable[[], None] = self.query_functions.pop(0)
         func()
         self.query_functions.append(func)
 
@@ -465,7 +467,7 @@ class CtpMdApi(MdApi):
         self.brokerid: str = ""
 
         self.current_date: str = datetime.now().strftime("%Y%m%d")
-        
+
         # 订阅队列刷新计数器
         self.sub_count: int = 0
         self.sub_interval: int = 0  # 将在 connect 时设置
@@ -485,10 +487,11 @@ class CtpMdApi(MdApi):
         if not error["ErrorID"]:
             self.login_status = True
             self.gateway.write_log("行情服务器登录成功")
-            
+
             # 注册定时器用于刷新订阅队列和更新日期
             self.gateway.event_engine.register(EVENT_TIMER, self.process_timer_event)
 
+            symbol: str
             for symbol in self.subscribed:
                 self.subscribe_queue.append((symbol, True))
         else:
@@ -593,7 +596,7 @@ class CtpMdApi(MdApi):
         self.userid = userid
         self.password = password
         self.brokerid = brokerid
-        
+
         # 设置订阅刷新间隔
         interval: float = self.gateway.event_engine._interval or 1
         self.sub_interval = max(1, ceil(1 / interval))
@@ -637,7 +640,7 @@ class CtpMdApi(MdApi):
         """定时批量发送订阅/退订请求"""
         if not self.login_status:
             return
-        
+
         # 计数器控制刷新频率
         self.sub_count += 1
         if self.sub_count < self.sub_interval:
@@ -665,7 +668,7 @@ class CtpMdApi(MdApi):
 
         if unsubscribe_symbols:
             self.unSubscribeMarketData(unsubscribe_symbols)
-    
+
     def process_timer_event(self, event: Event) -> None:
         """定时事件处理"""
         self.flush_subscribe_queue()
@@ -1170,6 +1173,9 @@ class CtpTdApi(TdApi):
         self.order_ref += 1
 
         tp: tuple = ORDERTYPE_VT2CTP[req.type]
+        price_type: str
+        time_condition: str
+        volume_condition: str
         price_type, time_condition, volume_condition = tp
 
         order_memo: str = req.reference
@@ -1216,6 +1222,9 @@ class CtpTdApi(TdApi):
 
     def cancel_order(self, req: CancelRequest) -> None:
         """委托撤单"""
+        frontid: str
+        sessionid: str
+        order_ref: str
         frontid, sessionid, order_ref = req.orderid.split("_")
 
         ctp_req: dict = {
