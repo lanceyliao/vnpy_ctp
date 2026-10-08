@@ -686,21 +686,20 @@ int MdApi::subscribeMarketData(string instrumentID)
 	return i;
 };
 
-int MdApi::subscribeMarketData(const vector<string>& instrumentIDs)
+int MdApi::subscribeMarketData(const vector<string> &instrumentIDs)
 {
 	if (instrumentIDs.empty())
 	{
 		return 0;
 	}
 
-	vector<char*> buffers;
-	buffers.reserve(instrumentIDs.size());
-	for (const string& instrumentID : instrumentIDs)
+	vector<char*> myreq;
+	myreq.reserve(instrumentIDs.size());
+	for (const string &instrumentID : instrumentIDs)
 	{
-		buffers.push_back((char*)instrumentID.c_str());
+		myreq.push_back((char*)instrumentID.c_str());
 	}
-
-	int i = this->api->SubscribeMarketData(buffers.data(), static_cast<int>(buffers.size()));
+	int i = this->api->SubscribeMarketData(myreq.data(), static_cast<int>(myreq.size()));
 	return i;
 };
 
@@ -712,21 +711,21 @@ int MdApi::unSubscribeMarketData(string instrumentID)
 	return i;
 };
 
-int MdApi::unSubscribeMarketData(const vector<string>& instrumentIDs)
+int MdApi::unSubscribeMarketData(const vector<string> &instrumentIDs)
 {
 	if (instrumentIDs.empty())
 	{
 		return 0;
 	}
 
-	vector<char*> buffers;
-	buffers.reserve(instrumentIDs.size());
+	vector<char*> myreq;
+	myreq.reserve(instrumentIDs.size());
 	for (const string& instrumentID : instrumentIDs)
 	{
-		buffers.push_back((char*)instrumentID.c_str());
+		myreq.push_back((char*)instrumentID.c_str());
 	}
 
-	int i = this->api->UnSubscribeMarketData(buffers.data(), static_cast<int>(buffers.size()));
+	int i = this->api->UnSubscribeMarketData(myreq.data(), static_cast<int>(myreq.size()));
 	return i;
 };
 
