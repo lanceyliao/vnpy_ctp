@@ -1,7 +1,9 @@
 """实现 CTP 期货交易接口。"""
-from collections.abc import Callable
+
 import json
+import os
 import re
+from collections.abc import Callable
 import sys
 from math import ceil
 from collections import deque
@@ -160,6 +162,7 @@ class Settlement:
         self.filename: str = ""
 
     def _begin(self, trading_day: str, userid: str, reqid: int) -> None:
+        """发起查询时固定 trading_day、userid、reqid，并生成 settlement 目录下的文件名（不含路径）。"""
         self._clear_pending()
         self.text = ""
         self.trading_day = trading_day
@@ -204,6 +207,7 @@ class Settlement:
         self._clear_pending()
 
     def _save(self) -> Path:
+        """目录来自 get_folder_path，文件名为 _begin 已定的 self.filename。"""
         if not self.text:
             raise ValueError("Settlement._save: 无正文")
         if not self.filename:
@@ -365,8 +369,8 @@ class CtpGateway(BaseGateway):
 
     def on_order(self, order: OrderData) -> None:
         """仅推送有效增量：成交量上涨，或成交量不变但状态变化"""
-        # CTP回调线程和EventEngine下单线程都可能进入此处。必须把判重、
-        # 缓存更新和事件入队作为整体串行化，避免REJECTED后倒退到SUBMITTING。
+        # 柜台回调线程和EventEngine下单线程都可能进入此处。必须把判重、
+        # 缓存更新和事件入队作为整体串行化，避免终态后出现状态倒退。
         with self._order_lock:
             last_order: OrderData | None = self.orders.get(order.orderid)
             if last_order:
@@ -604,7 +608,7 @@ class CtpMdApi(MdApi):
         # 禁止重复发起连接，会导致异常崩溃
         if not self.connect_status:
             path: Path = get_folder_path(self.gateway_name.lower())
-            self.createFtdcMdApi((str(path) + "\\Md").encode("GBK"), production_mode)
+            self.createFtdcMdApi(os.fsencode(path / "Md"), production_mode)
 
             for address in addresses:
                 self.registerFront(address)
@@ -614,14 +618,14 @@ class CtpMdApi(MdApi):
 
     def login(self) -> None:
         """用户登录"""
-        ctp_req: dict = {
+        req: dict = {
             "UserID": self.userid,
             "Password": self.password,
             "BrokerID": self.brokerid
         }
 
         self.reqid += 1
-        self.reqUserLogin(ctp_req, self.reqid)
+        self.reqUserLogin(req, self.reqid)
 
     def subscribe(self, req: SubscribeRequest) -> None:
         """订阅行情"""
@@ -758,12 +762,12 @@ class CtpTdApi(TdApi):
             self.gateway.write_log("交易服务器登录成功")
 
             # 自动确认结算单
-            ctp_req: dict = {
+            req: dict = {
                 "BrokerID": self.brokerid,
                 "InvestorID": self.userid
             }
             self.reqid += 1
-            self.reqSettlementInfoConfirm(ctp_req, self.reqid)
+            self.reqSettlementInfoConfirm(req, self.reqid)
         else:
             self.login_failed = True
 
@@ -929,7 +933,7 @@ class CtpTdApi(TdApi):
 
     def query_order(self, orderid: str = "") -> int:
         """查询委托；可传入 orderid 查询特定订单，不传则查询全部"""
-        ctp_req: dict = {
+        req: dict = {
             "BrokerID": self.brokerid,
             "InvestorID": self.userid
         }
@@ -937,13 +941,13 @@ class CtpTdApi(TdApi):
             # 通过 orderid_sysid_map 反向查找 OrderSysID
             order_sysid = self.orderid_sysid_map.get(orderid)
             if order_sysid:
-                ctp_req["OrderSysID"] = order_sysid
+                req["OrderSysID"] = order_sysid
             else:
                 # 如果找不到 OrderSysID，则查询全部订单
                 pass
 
         self.reqid += 1
-        n: int = self.reqQryOrder(ctp_req, self.reqid)
+        n: int = self.reqQryOrder(req, self.reqid)
         return n
 
     def onRspQryOrder(self, data: dict, error: dict, reqid: int, last: bool) -> None:
@@ -985,7 +989,6 @@ class CtpTdApi(TdApi):
                 contract.option_expiry = datetime.strptime(data["ExpireDate"], "%Y%m%d")
 
             symbol_contract_map[contract.symbol] = contract
-
             self.gateway.on_contract(contract)
 
         if last:
@@ -1061,10 +1064,10 @@ class CtpTdApi(TdApi):
         self.orderid_sysid_map[orderid] = data["OrderSysID"]
 
         # 特殊情况撤单（非交易时段、资金不足等）的日志输出
-        status_msg: str = data["StatusMsg"]
+        status_msg: str = data.get("StatusMsg", "")
         if (
             data["OrderStatus"] == THOST_FTDC_OST_Canceled
-            and status_msg != "已撤单"       # 正常撤单
+            and status_msg != "已撤单"       # 过滤正常撤单
         ):
             self.gateway.write_log(f"委托 {orderid} 状态更新，{status_msg}")
 
@@ -1118,7 +1121,7 @@ class CtpTdApi(TdApi):
 
         if not self.connect_status:
             path: Path = get_folder_path(self.gateway_name.lower())
-            self.createFtdcTraderApi((str(path) + "\\Td").encode("GBK"), production_mode)
+            self.createFtdcTraderApi(os.fsencode(path / "Td"), production_mode)
 
             self.subscribePrivateTopic(0)
             self.subscribePublicTopic(0)
@@ -1135,7 +1138,7 @@ class CtpTdApi(TdApi):
         if self.auth_failed:
             return
 
-        ctp_req: dict = {
+        req: dict = {
             "UserID": self.userid,
             "BrokerID": self.brokerid,
             "AuthCode": self.auth_code,
@@ -1144,21 +1147,21 @@ class CtpTdApi(TdApi):
         }
 
         self.reqid += 1
-        self.reqAuthenticate(ctp_req, self.reqid)
+        self.reqAuthenticate(req, self.reqid)
 
     def login(self) -> None:
         """用户登录"""
         if self.login_failed:
             return
 
-        ctp_req: dict = {
+        req: dict = {
             "UserID": self.userid,
             "Password": self.password,
             "BrokerID": self.brokerid
         }
 
         self.reqid += 1
-        self.reqUserLogin(ctp_req, self.reqid)
+        self.reqUserLogin(req, self.reqid)
 
     def send_order(self, req: OrderRequest) -> str:
         """委托下单"""
@@ -1186,7 +1189,7 @@ class CtpTdApi(TdApi):
                 f"OrderMemo长度超过13字符，已截断：{original_order_memo} -> {order_memo}"
             )
 
-        ctp_req: dict = {
+        req: dict = {
             "InstrumentID": req.symbol,
             "ExchangeID": req.exchange.value,
             "LimitPrice": req.price,
@@ -1209,7 +1212,7 @@ class CtpTdApi(TdApi):
         }
 
         self.reqid += 1
-        n: int = self.reqOrderInsert(ctp_req, self.reqid)
+        n: int = self.reqOrderInsert(req, self.reqid)
         if n:
             self.gateway.write_log(f"委托请求发送失败，错误代码：{n}")
             return ""
@@ -1227,7 +1230,7 @@ class CtpTdApi(TdApi):
         order_ref: str
         frontid, sessionid, order_ref = req.orderid.split("_")
 
-        ctp_req: dict = {
+        req: dict = {
             "InstrumentID": req.symbol,
             "ExchangeID": req.exchange.value,
             "OrderRef": order_ref,
@@ -1239,7 +1242,7 @@ class CtpTdApi(TdApi):
         }
 
         self.reqid += 1
-        self.reqOrderAction(ctp_req, self.reqid)
+        self.reqOrderAction(req, self.reqid)
 
     def query_account(self) -> None:
         """查询资金"""
@@ -1251,13 +1254,13 @@ class CtpTdApi(TdApi):
         if not symbol_contract_map:
             return
 
-        ctp_req: dict = {
+        req: dict = {
             "BrokerID": self.brokerid,
             "InvestorID": self.userid
         }
 
         self.reqid += 1
-        self.reqQryInvestorPosition(ctp_req, self.reqid)
+        self.reqQryInvestorPosition(req, self.reqid)
 
     def query_settlement(self, trading_day: str = "") -> None:
         """发起一次 ReqQrySettlementInfo；未传 trading_day 时用 default_qday()（上海时区早于 18:00 用前一自然日，否则当天）。可传 yyyymmdd 或月结 yymm。"""
@@ -1266,7 +1269,7 @@ class CtpTdApi(TdApi):
             return
 
         qday: str = trading_day or Settlement.default_qday()
-        ctp_req: dict = {
+        req: dict = {
             "BrokerID": self.brokerid,
             "InvestorID": self.userid,
             "TradingDay": qday,
@@ -1275,11 +1278,10 @@ class CtpTdApi(TdApi):
 
         self.reqid += 1
         self.settlement_cap._begin(qday, self.userid, self.reqid)
-        n: int = self.reqQrySettlementInfo(ctp_req, self.reqid)
+        n: int = self.reqQrySettlementInfo(req, self.reqid)
         if n:
             self.settlement_cap._abandon_send()
             self.gateway.write_log(f"查询结算单请求未发出（流控等），错误码：{n}，请稍后重试 query_settlement")
-
 
     def close(self) -> None:
         """关闭连接"""
